@@ -129,13 +129,14 @@ ChatGPT conversation in Zotero and choose **Export → Save conversation snapsho
 Keep that same conversation open in the browser. The extension captures its loaded
 user/assistant messages, computed layout styles, tables, SVG paths, and available
 raster images. Zotero imports the single offline HTML file as a child attachment.
-The existing Markdown and note exports are unchanged. No new extension permissions
-are required.
+The existing Markdown and note exports are unchanged. This feature adds access to
+`https://images.openai.com/*` for offline image embedding. CDN downloads omit cookies
+and reject redirects.
 
 This is a static snapshot, not a live ChatGPT page. Scroll through long conversations
-first so their messages are loaded. Sidebar/account UI, scripts, interactive widgets,
-external fonts, and original uploaded files are not included. Unavailable images
-produce an explicit warning. Only ordinary `https://chatgpt.com/c/...` conversations
+first so their messages are loaded. Charts and inline references become static content;
+sidebar/account UI, scripts, external fonts, and original uploaded files are not included.
+An unavailable image aborts the save instead of creating an incomplete archive. Only ordinary `https://chatgpt.com/c/...` conversations
 are supported initially. Capture is limited to 16 MiB and 12,000 DOM nodes; a changed
 conversation, active generation, timeout, or unavailable tab fails without saving the
 wrong conversation. Each save creates a new attachment; it does not overwrite notes.
