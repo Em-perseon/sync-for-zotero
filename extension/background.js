@@ -423,7 +423,7 @@ async function heartbeat() {
         relayFetch(`${SERVER}/extension_status`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(extensionStatus),
+          body: JSON.stringify({ ...extensionStatus, conversationSnapshotVersion: 1 }),
         }).catch(() => {});
       } catch { /* non-critical */ }
 
@@ -950,7 +950,52 @@ async function scrapeDeepSeekHistory(siteConfig, historyStartedAt) {
   });
 }
 
+let snapshotRunning = false;
+
+// A separate request slot leaves navigation/history commands untouched.
+async function pollForSnapshot() {
+  if (snapshotRunning || pipelineRunning || !zoteroConnected) return;
+  snapshotRunning = true;
+  const server = SERVER;
+  let request;
+  try {
+    const response = await relayFetch(`${server}/poll_snapshot`);
+    if (!response.ok) return; // Older Zotero plugins do not expose this endpoint.
+    ({ request } = await response.json());
+    if (!request) return;
+    if (pipelineRunning) throw new Error("Wait for the current answer to finish before saving.");
+    const expected = new URL(request.url);
+    if (expected.origin !== "https://chatgpt.com" || !/^\/c\/[a-zA-Z0-9-]+$/.test(expected.pathname)) throw new Error("Unsupported snapshot conversation URL.");
+    const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+    const matching = tabs.filter(tab => {
+      try { const url = new URL(tab.url); return url.origin + url.pathname.replace(/\/$/, "") === request.url; } catch (_) { return false; }
+    });
+    const tab = matching.find(tab => tab.id === activeChatTabId) || matching.find(tab => tab.active) || matching[0];
+    if (!tab) throw new Error("Open this conversation in ChatGPT before saving a snapshot.");
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["conversation_snapshot.js"] });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async url => globalThis.SyncZoteroSnapshot.capture(url),
+      args: [request.url],
+    });
+    const result = results[0]?.result;
+    if (!result?.html) throw new Error("The browser could not capture this conversation.");
+    const saved = await relayFetch(`${server}/submit_snapshot`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...result, id: request.id }),
+    });
+    if (!saved.ok) throw new Error("Zotero rejected the conversation snapshot.");
+  } catch (error) {
+    if (request?.id) await relayFetch(`${server}/submit_snapshot`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: request.id, error: error?.message || String(error) }),
+    }).catch(() => {});
+  } finally { snapshotRunning = false; }
+}
+
 async function pollForCommand() {
+  if (snapshotRunning) return;
+  await pollForSnapshot();
   if (pipelineRunning) return;
   if (!zoteroConnected) return;
   try {
@@ -1159,6 +1204,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 async function pollForQuery() {
+  if (snapshotRunning) return;
   if (pipelineRunning) return;
   if (!zoteroConnected) return;
 
