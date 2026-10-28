@@ -81,7 +81,7 @@ test("mismatched URL, missing messages, and active generation fail explicitly", 
   );
 });
 
-test("failed images leave an explicit offline warning, never a remote resource", async () => {
+test("failed images reject incomplete snapshots", async () => {
   const s = setup(
     '<div data-message-author-role="assistant"><img src="https://private.example/image"></div>',
     {
@@ -90,10 +90,29 @@ test("failed images leave an explicit offline warning, never a remote resource",
       },
     },
   );
+  await assert.rejects(s.capture(), /No incomplete snapshot/);
+});
+
+test("preserves inline references and SVG HTML labels, without interactive handlers", async () => {
+  const s = setup(
+    '<div data-message-author-role="assistant"><p>Journal <button onclick="evil()">Decision Support Systems</button><span role="button">main 1.pdf</span></p><svg viewBox="0 0 752 340"><foreignObject x="55" y="315" width="164" height="24"><div>前 1 个</div></foreignObject></svg></div>',
+  );
   const result = await s.capture();
-  assert.equal(result.warnings.length, 1);
-  assert.doesNotMatch(result.html, /private.example/);
-  assert.match(result.html, /Image unavailable offline/);
+  assert.match(result.html, /Decision Support Systems/);
+  assert.match(result.html, /main 1.pdf/);
+  assert.match(result.html, /foreignobject/i);
+  assert.match(result.html, /前 1 个/);
+  assert.doesNotMatch(result.html, /onclick|<button|role="button"/);
+});
+
+test("exports one native formula instead of both KaTeX representations", async () => {
+  const s = setup(
+    '<div data-message-author-role="assistant"><span class="katex"><span class="katex-mathml"><math><mover accent="true"><mi>Y</mi><mo stretchy="true">^</mo></mover></math></span><span class="katex-html">DUPLICATE</span></span></div>',
+  );
+  const result = await s.capture();
+  assert.equal((result.html.match(/<math/g) || []).length, 1);
+  assert.match(result.html, /accent="true"/);
+  assert.doesNotMatch(result.html, /DUPLICATE/);
 });
 
 test("navigation during image capture rejects rather than saving the wrong conversation", async () => {
@@ -105,4 +124,11 @@ test("navigation during image capture rejects rather than saving the wrong conve
     return "data:image/png;base64,aGVsbG8=";
   };
   await assert.rejects(s.capture(), /changed while saving/);
+});
+
+test("does not archive a ChatGPT response loading failure as a complete conversation", async () => {
+  const s = setup(
+    '<div data-message-author-role="user">Question</div><div data-message-author-role="assistant"><div role="status">无法加载此回复</div></div>',
+  );
+  await assert.rejects(s.capture(), /could not load this response/);
 });

@@ -11,16 +11,16 @@
     border-radius box-shadow box-sizing max-width min-width width height
     flex-direction flex-wrap align-items justify-content gap row-gap column-gap flex-grow flex-shrink flex-basis
     grid-template-columns grid-template-rows grid-column grid-row list-style-type
-    border-collapse border-spacing table-layout fill stroke stroke-width transform`.split(
+    border-collapse border-spacing table-layout fill stroke stroke-width stroke-linecap stroke-linejoin text-anchor dominant-baseline transform position top right bottom left overflow overflow-x overflow-y object-fit object-position aspect-ratio clip clip-path`.split(
       /\s+/,
     );
   const ALLOWED = new Set(
-    "div span p section article header footer main h1 h2 h3 h4 h5 h6 strong b em i u s del small sub sup br hr blockquote pre code ul ol li dl dt dd table thead tbody tfoot tr th td caption colgroup col a img figure figcaption details summary svg g path circle ellipse line polyline polygon rect text tspan defs marker clipPath use math semantics annotation mrow mi mn mo ms mtext mfrac msqrt mroot msub msup msubsup munder mover munderover mtable mtr mtd"
+    "div span p section article header footer main h1 h2 h3 h4 h5 h6 strong b em i u s del small sub sup br hr blockquote pre code ul ol li dl dt dd table thead tbody tfoot tr th td caption colgroup col a img figure figcaption details summary svg foreignObject g path circle ellipse line polyline polygon rect text tspan defs marker clipPath use math semantics annotation mrow mi mn mo ms mtext mfrac msqrt mroot msub msup msubsup munder mover munderover mtable mtr mtd"
       .toLowerCase()
       .split(" "),
   );
   const ATTRS = new Set(
-    "colspan rowspan scope start reversed value open title alt dir lang viewbox d fill stroke stroke-width x y x1 x2 y1 y2 cx cy r rx ry points width height transform xmlns display encoding".split(
+    "colspan rowspan scope start reversed value open title alt dir lang viewbox d fill stroke stroke-width x y x1 x2 y1 y2 cx cy r rx ry points width height transform xmlns display encoding accent stretchy mathvariant mathsize movablelimits columnalign rowalign columnspacing rowspacing text-anchor dominant-baseline dx dy stroke-linecap stroke-linejoin preserveaspectratio".split(
       " ",
     ),
   );
@@ -66,6 +66,16 @@
       )
     )
       throw new Error("Wait for the answer to finish before saving.");
+    if (
+      [...doc.querySelectorAll('[role="status"]')].some((el) =>
+        /无法加载此回复|Unable to load this response/i.test(
+          el.textContent || "",
+        ),
+      )
+    )
+      throw new Error(
+        "ChatGPT could not load this response. Reload the conversation before saving.",
+      );
     const roots = messageRoots(doc);
     if (!roots.length)
       throw new Error(
@@ -85,6 +95,13 @@
     const fetchImage =
       env.fetchImage ||
       (async (src) => {
+        if (
+          env.images &&
+          Object.prototype.hasOwnProperty.call(env.images, src)
+        ) {
+          if (!env.images[src]) throw new Error("Image unavailable");
+          return env.images[src];
+        }
         const response = await fetch(src, {
           signal: AbortSignal.timeout(10000),
           credentials: "same-origin",
@@ -134,12 +151,25 @@
         return out.createTextNode(node.textContent || "");
       if (node.nodeType !== 1) return null;
       const tag = node.localName.toLowerCase();
+      // KaTeX renders two representations. Retain only native MathML, avoiding
+      // duplicate formulas and dependencies on KaTeX web fonts/positioning.
+      if (node.classList?.contains("katex")) {
+        const math = node.querySelector("math");
+        if (math) return copy(math);
+      }
+      if (tag === "annotation" || tag === "annotation-xml") return null;
+      const passiveControl =
+        tag === "button" || node.getAttribute("role") === "button";
+      const label =
+        node.getAttribute("aria-label") || node.textContent?.trim() || "";
       if (
-        !ALLOWED.has(tag) ||
-        node.getAttribute("role") === "button" ||
-        node.hidden
+        passiveControl &&
+        /^(Share|Copy|Open |共享$|分享$|复制$|添加到收藏夹$|图表选项$)/i.test(
+          label,
+        )
       )
         return null;
+      if ((!ALLOWED.has(tag) && !passiveControl) || node.hidden) return null;
       const computed = getStyle(node);
       if (
         computed.getPropertyValue("display") === "none" ||
@@ -149,10 +179,11 @@
       // SVG external <use> references require remote sprite sheets. Keep only rendered paths.
       if (tag === "use") return null;
       const target =
+        !passiveControl &&
         node.namespaceURI &&
         node.namespaceURI !== "http://www.w3.org/1999/xhtml"
           ? out.createElementNS(node.namespaceURI, node.localName)
-          : out.createElement(tag);
+          : out.createElement(passiveControl ? "span" : tag);
       for (const attr of [...node.attributes])
         if (ATTRS.has(attr.name.toLowerCase()) && !/url\s*\(/i.test(attr.value))
           target.setAttribute(attr.name, attr.value);
@@ -166,12 +197,22 @@
         } catch (_) {}
       }
       const declarations = PROPERTIES.map((property) => {
+        // MathML supplies its own layout; CSS copied from the hidden KaTeX
+        // accessibility representation must not override native math layout.
+        if (node.namespaceURI === "http://www.w3.org/1998/Math/MathML")
+          return "";
         let value = computed.getPropertyValue(property);
+        if (property === "position" && ["fixed", "sticky"].includes(value))
+          value = "static";
         if (!value || /url\s*\(|[<>]/i.test(value)) return "";
         // Do not pin text containers to the source viewport's measured pixel height/width.
         if (
           ["height", "width"].includes(property) &&
-          !["svg", "img", "table"].includes(tag)
+          !(
+            ["svg", "img", "table"].includes(tag) ||
+            node.namespaceURI === "http://www.w3.org/2000/svg" ||
+            computed.getPropertyValue("position") === "absolute"
+          )
         )
           return "";
         return `${property}:${value}`;
@@ -188,12 +229,8 @@
             await embedImage(node.currentSrc || node.getAttribute("src")),
           );
         } catch (_) {
-          warnings.add(
-            "Some images could not be embedded; their alternative text is shown.",
-          );
-          target.setAttribute(
-            "alt",
-            node.getAttribute("alt") || "[Image unavailable offline]",
+          throw new Error(
+            "An image could not be saved offline. No incomplete snapshot was saved. Keep the conversation open and retry.",
           );
         }
       }
@@ -259,7 +296,7 @@
     const notice = out.createElement("p");
     notice.setAttribute("class", "snapshot-notice");
     notice.textContent =
-      "Static snapshot of the messages loaded in the browser. Interactive widgets and original uploaded files are not included. " +
+      "Static snapshot of the messages loaded in the browser. Charts and references are static; original uploaded files are not embedded. " +
       [...warnings].join(" ");
     out.body.appendChild(notice);
     const meta = out.createElement("meta");

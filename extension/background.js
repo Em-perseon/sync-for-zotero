@@ -973,10 +973,38 @@ async function pollForSnapshot() {
     const tab = matching.find(tab => tab.id === activeChatTabId) || matching.find(tab => tab.active) || matching[0];
     if (!tab) throw new Error("Open this conversation in ChatGPT before saving a snapshot.");
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["conversation_snapshot.js"] });
+    const imageList = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => globalThis.SyncZoteroSnapshot.messageRoots(document).flatMap(root => [...root.querySelectorAll("img")].map(img => img.currentSrc || img.src)),
+    });
+    const images = {};
+    let totalBytes = 0;
+    // Fetch only the image CDN used by ChatGPT, without cookies or redirects.
+    // Other image origins remain subject to normal page CORS checks.
+    for (const src of new Set(imageList[0]?.result || [])) {
+      const asset = new URL(src);
+      if (asset.origin !== "https://images.openai.com") continue;
+      const response = await fetch(src, { credentials: "omit", redirect: "error", signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error("Could not download a conversation image. Please retry.");
+      const mime = (response.headers.get("content-type") || "").split(";")[0].trim();
+      if (!/^image\/(png|jpeg|gif|webp|avif)$/.test(mime)) throw new Error("Unsupported conversation image type.");
+      const reader = response.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.length;
+        if (totalBytes > 10 * 1024 * 1024) { await reader.cancel(); throw new Error("Conversation images exceed the snapshot size limit."); }
+        chunks.push(value);
+      }
+      let binary = "";
+      for (const chunk of chunks) for (let i = 0; i < chunk.length; i += 8192) binary += String.fromCharCode(...chunk.subarray(i, i + 8192));
+      images[src] = `data:${mime};base64,${btoa(binary)}`;
+    }
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: async url => globalThis.SyncZoteroSnapshot.capture(url),
-      args: [request.url],
+      func: async (url, images) => globalThis.SyncZoteroSnapshot.capture(url, { images }),
+      args: [request.url, images],
     });
     const result = results[0]?.result;
     if (!result?.html) throw new Error("The browser could not capture this conversation.");
